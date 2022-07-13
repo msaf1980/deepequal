@@ -23,7 +23,7 @@ type visit struct {
 // Tests for deep equality using reflected types. The map argument tracks
 // comparisons that have already been seen, which allows short circuiting on
 // recursive types.
-func deepValueEqual(v1, v2 reflect.Value, visited map[visit]bool, depth int) (bool, string) {
+func deepValueEqual(v1, v2 reflect.Value, visited map[visit]bool, depth int, skipUnexported bool) (bool, string) {
 	if !v1.IsValid() || !v2.IsValid() {
 		return v1.IsValid() == v2.IsValid(), "invalid values are not equal"
 	}
@@ -77,7 +77,7 @@ func deepValueEqual(v1, v2 reflect.Value, visited map[visit]bool, depth int) (bo
 		return false, "scalar values differ"
 	case reflect.Array:
 		for i := 0; i < v1.Len(); i++ {
-			if equal, reason := deepValueEqual(v1.Index(i), v2.Index(i), visited, depth+1); !equal {
+			if equal, reason := deepValueEqual(v1.Index(i), v2.Index(i), visited, depth+1, skipUnexported); !equal {
 				return false, reason
 			}
 		}
@@ -93,7 +93,7 @@ func deepValueEqual(v1, v2 reflect.Value, visited map[visit]bool, depth int) (bo
 			return true, ""
 		}
 		for i := 0; i < v1.Len(); i++ {
-			if equal, reason := deepValueEqual(v1.Index(i), v2.Index(i), visited, depth+1); !equal {
+			if equal, reason := deepValueEqual(v1.Index(i), v2.Index(i), visited, depth+1, skipUnexported); !equal {
 				return false, fmt.Sprintf("[%d] %s", i, reason)
 			}
 		}
@@ -102,13 +102,20 @@ func deepValueEqual(v1, v2 reflect.Value, visited map[visit]bool, depth int) (bo
 		if v1.IsNil() || v2.IsNil() {
 			return v1.IsNil() == v2.IsNil(), "both interfaces must be nil"
 		}
-		return deepValueEqual(v1.Elem(), v2.Elem(), visited, depth+1)
+		return deepValueEqual(v1.Elem(), v2.Elem(), visited, depth+1, skipUnexported)
 	case reflect.Ptr:
-		return deepValueEqual(v1.Elem(), v2.Elem(), visited, depth+1)
+		return deepValueEqual(v1.Elem(), v2.Elem(), visited, depth+1, skipUnexported)
 	case reflect.Struct:
 		for i, n := 0, v1.NumField(); i < n; i++ {
-			if equal, reason := deepValueEqual(v1.Field(i), v2.Field(i), visited, depth+1); !equal {
-				return false, "struct." + v1.Type().Field(i).Name + " " + reason
+			name := v1.Type().Field(i).Name
+			if name[0] < 'A' || name[0] > 'Z' {
+				if skipUnexported {
+					return true, ""
+				}
+				return false, "struct." + name + " unexported"
+			}
+			if equal, reason := deepValueEqual(v1.Field(i), v2.Field(i), visited, depth+1, skipUnexported); !equal {
+				return false, "struct." + name + " " + reason
 			}
 		}
 		return true, ""
@@ -123,7 +130,7 @@ func deepValueEqual(v1, v2 reflect.Value, visited map[visit]bool, depth int) (bo
 			return true, ""
 		}
 		for _, k := range v1.MapKeys() {
-			if equal, reason := deepValueEqual(v1.MapIndex(k), v2.MapIndex(k), visited, depth+1); !equal {
+			if equal, reason := deepValueEqual(v1.MapIndex(k), v2.MapIndex(k), visited, depth+1, skipUnexported); !equal {
 				key := k.Convert(v1.Type().Key())
 				return false, fmt.Sprintf("[%+v] %s", key, reason)
 			}
@@ -150,6 +157,7 @@ func deepValueEqual(v1, v2 reflect.Value, visited map[visit]bool, depth int) (bo
 // equality. DeepEqual correctly handles recursive types. Functions are equal
 // only if they are both nil.
 // An empty slice is not equal to a nil slice.
+// If unexported field is found, return false, 'struct.NAME unexported'
 func Compare(a1, a2 interface{}) (bool, string) {
 	if a1 == nil || a2 == nil {
 		return a1 == a2, "nil values are of different types"
@@ -159,5 +167,24 @@ func Compare(a1, a2 interface{}) (bool, string) {
 	if v1.Type() != v2.Type() {
 		return false, "values are of different types"
 	}
-	return deepValueEqual(v1, v2, make(map[visit]bool), 0)
+	return deepValueEqual(v1, v2, make(map[visit]bool), 0, false)
+}
+
+// CompareS tests for deep equality. It uses normal == equality where
+// possible but will scan elements of arrays, slices, maps, and fields of
+// structs. In maps, keys are compared with == but elements use deep
+// equality. DeepEqual correctly handles recursive types. Functions are equal
+// only if they are both nil.
+// An empty slice is not equal to a nil slice.
+// If unexported field is found, skip this field
+func CompareS(a1, a2 interface{}) (bool, string) {
+	if a1 == nil || a2 == nil {
+		return a1 == a2, "nil values are of different types"
+	}
+	v1 := reflect.ValueOf(a1)
+	v2 := reflect.ValueOf(a2)
+	if v1.Type() != v2.Type() {
+		return false, "values are of different types"
+	}
+	return deepValueEqual(v1, v2, make(map[visit]bool), 0, true)
 }
